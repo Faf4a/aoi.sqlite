@@ -1,0 +1,10 @@
+{
+  "name": "aoi.sqlite",
+  "version": "0.0.1",
+  "description": "Package which brings SQL support to aoi.js",
+  "main": "./classes/Database.js",
+  "license": "ISC",
+  "dependencies": {
+    "better-sqlite3": "^11.2.1"
+  }
+}

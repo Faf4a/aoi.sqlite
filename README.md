@@ -7,6 +7,7 @@
 To get started with aoi.sqlite, we have to do a couple things.
 
 - Install the package.
+
 ```bash
 npm install github:faf4a/aoi.sqlite
 ```
@@ -29,19 +30,22 @@ new Database(client, {
   location: "./database.db", // your SQLite file location
   tables: ["main"],
   logging: true, // default is true
+  debug: true, // default is false
 });
 
 client.variables({
     variable: "value"
-});
+}); // just like you did before.
 
 // rest of your index.js..
 ```
 
-## Transfer aoi.db database
+## aoi.db
 
-Not possible yet!
+### Transfer aoi.db database
+
+That's currently not possible with this package.
 
 ### Want to keep aoi.db?
 
-That's currently not possible with this package.
+That's currently not possible with this package and not planned in the near future.

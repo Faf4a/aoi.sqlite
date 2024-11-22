@@ -1,6 +1,6 @@
 {
   "name": "aoi.sqlite",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Package which brings SQL support to aoi.js",
   "main": "./classes/Database.js",
   "license": "ISC",

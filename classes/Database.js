@@ -2,299 +2,272 @@ const Database = require("better-sqlite3");
 const AoiError = require("aoi.js/src/classes/AoiError");
 const Interpreter = require("aoi.js/src/core/interpreter.js");
 const { performance } = require("perf_hooks");
+const EventEmitter = require("events");
 
-class SQLDatabase {
+class SQLDatabase extends EventEmitter {
   constructor(client, options) {
+    super();
     this.client = client;
     this.options = options;
     this.debug = this.options.debug ?? false;
 
     this.connect();
+
+    this.client.db.get = this.get.bind(this);
+    this.client.db.set = this.set.bind(this);
+    this.client.db.drop = this.drop.bind(this);
+    this.client.db.findOne = this.findOne.bind(this);
+    this.client.db.deleteMany = this.deleteMany.bind(this);
+    this.client.db.delete = this.delete.bind(this);
+    this.client.db.findMany = this.findMany.bind(this);
+    this.client.db.all = this.all.bind(this);
+    this.client.db.db.avgPing = this.ping.bind(this);
   }
 
   connect() {
     try {
-      if (!this.options.location) throw new TypeError("Missing database folder, please provide a location for the database.");
+      if (!this.options.location) throw new TypeError("Missing database file option, please provide a location for the database under 'location' with the '.db' extension.");
+
       this.client.db = new Database(this.options.location);
 
       this.client.db.pragma("journal_mode = WAL");
 
       if (!this.options.tables || this.options?.tables.length === 0) throw new TypeError("Missing variable tables, please provide at least one table.");
       if (this.options.tables.includes("__aoijs_vars__")) throw new TypeError("'__aoijs_vars__' is reserved as a table name.");
-      this.client.db.tables = [...this.options.tables, "__aoijs_vars__"];
 
-      const createTables = this.client.db.transaction(() => {
-        this.client.db.tables.forEach((table) => {
-          this.client.db.prepare(`CREATE TABLE IF NOT EXISTS ${table} (key TEXT PRIMARY KEY, value TEXT)`).run();
-        });
-      });
+      this.tables = [...this.options.tables, "__aoijs_vars__"];
+      this.client.db.tables = this.tables;
 
-      try {
-        createTables();
-      } catch (error) {
-        throw error;
-      }
+      this.createTables();
+      this.readyAt = Date.now();
 
-      this.client.db.get = this.get.bind(this);
-      this.client.db.set = this.set.bind(this);
-      this.client.db.drop = this.drop.bind(this);
-      this.client.db.delete = this.delete.bind(this);
-      this.client.db.deleteMany = this.deleteMany.bind(this);
-      this.client.db.findOne = this.findOne.bind(this);
-      this.client.db.findMany = this.findMany.bind(this);
-      this.client.db.all = this.all.bind(this);
-      this.client.db.avgPing = this.ping.bind(this);
-
-      if (!this.client.db.db) this.client.db.db = {};
+      if (!this.client.db.db) this.client.db.db = new EventEmitter();
       this.client.db.db.readyAt = Date.now();
 
-      if (this.options.logging != false) {
-        const { version } = require("../package.json");
+      const { version } = require("../package.json");
+
+      if (this.options.logging !== false) {
         AoiError.createConsoleMessage(
           [
-            {
-              text: `SQLite database connected successfully`,
-              textColor: "white"
-            },
-            {
-              text: `Loaded ${this.client.db.tables.length} tables`,
-              textColor: "white"
-            },
-            {
-              text: `Installed on v${version}`,
-              textColor: "green"
-            }
+            { text: "SQLite database loaded successfully", textColor: "green" },
+            { text: `Loaded ${this.tables.length} tables`, textColor: "white" },
+            { text: `Installed on v${version}`, textColor: "white" }
           ],
           "white",
           { text: " aoi.sqlite  ", textColor: "cyan" }
         );
       }
 
-      const client = this.client;
-
       this.client.once("ready", async () => {
-        await require("aoi.js/src/events/Custom/timeout.js")({ client, interpreter: Interpreter }, undefined, undefined, true);
-
+        await require("aoi.js/src/events/Custom/timeout.js")({ client: this.client, interpreter: Interpreter }, undefined, undefined, true);
         setInterval(async () => {
-          await require("aoi.js/src/events/Custom/handleResidueData.js")(client);
+          await require("aoi.js/src/events/Custom/handleResidueData.js")(this.client);
         }, 3.6e6);
       });
+
+      this.client.db.db.emit("ready");
     } catch (err) {
-      AoiError.createConsoleMessage(
-        [
-          {
-            text: `Failed to initialize`,
-            textColor: "red"
-          },
-          {
-            text: err.message,
-            textColor: "white"
-          }
-        ],
-        "white",
-        { text: " aoi.sqlite  ", textColor: "cyan" }
-      );
-      process.exit(0);
+      this.logError(`Failed to initialize: ${err.message}`);
+      process.exit(1);
     }
   }
 
+  createTables() {
+    const createTables = this.client.db.transaction(() => {
+      this.tables.forEach((table) => {
+        this.client.db.prepare(`CREATE TABLE IF NOT EXISTS ${table} (key TEXT PRIMARY KEY, value JSON)`).run();
+      });
+    });
+    createTables();
+  }
+
+  logError(message) {
+    AoiError.createConsoleMessage([{ text: message, textColor: "red" }], "white", { text: " aoi.sqlite  ", textColor: "cyan" });
+  }
+
   async ping() {
-    let start = performance.now();
+    const start = performance.now();
     await this.client.db.prepare(`SELECT 1`).get();
-    console.log(performance.now() - start);
-    return performance.now() - start;
+    const elapsed = performance.now() - start;
+    return elapsed;
   }
 
   get(table, key, id = undefined) {
     const aoijs_vars = ["cooldown", "setTimeout", "ticketChannel"];
-    const query = `SELECT value FROM ${table} WHERE key = ?`;
-    let data;
+    let fullKey = key;
+    if (id) fullKey = `${key}_${id}`;
 
-    if (this.debug == true) {
-      console.log(`[received] get(${table}, ${key}, ${id})`);
+    const query = `SELECT value FROM ${table} WHERE key = ?`;
+
+    if (this.debug) {
+      console.log(`[GET] ${table}:${fullKey}`);
     }
 
-    const op = this.client.db.transaction(() => {
-      if (aoijs_vars.includes(key)) {
-        data = this.client.db.prepare(query).get(`${key}_${id}`);
-      } else {
-        if (!this.client.variableManager.has(key, table)) return;
-        const __var = this.client.variableManager.get(key, table)?.default;
-        data = this.client.db.prepare(query).get(`${key}_${id}`) || __var;
-      }
-      console.log(data);
-    });
+    let data;
 
     try {
-      op();
+      const row = this.client.db.prepare(query).get(fullKey);
+      if (row) {
+        data = JSON.parse(row.value);
+      } else if (!aoijs_vars.includes(key) && this.client.variableManager.has(key, table)) {
+        data = this.client.variableManager.get(key, table).default;
+      }
     } catch (error) {
+      this.logError(`Error in get: ${error.message}`);
       throw error;
     }
 
-    if (this.debug == true) {
-      console.log(`[returning] get(${table}, ${key}, ${id}) -> ${typeof data === "object" ? JSON.stringify(data) : data}`);
+    if (this.debug) {
+      console.log(`[GET Result] ${table}:${fullKey} -> ${JSON.stringify(data)}`);
     }
 
-    return data;
+    return { value: data, key: fullKey, id };
   }
 
   set(table, key, id, value) {
-    const query = `INSERT OR REPLACE INTO ${table} (key, value) VALUES (?, ?)`;
-
-    if (this.debug == true) {
-      console.log(`[received] set(${table}, ${key}, ${id}, ${typeof value === "object" ? JSON.stringify(value) : value})`);
+    let fullKey = `${key}_${id}`;
+    if (fullKey.endsWith("_undefined")) {
+      fullKey = fullKey.replace("_undefined", "");
     }
+    const query = `INSERT OR REPLACE INTO ${table} (key, value) VALUES (?, ?)`;
+    const jsonValue = JSON.stringify(value);
 
-    const op = this.client.db.transaction(() => {
-      this.client.db.prepare(query).run(`${key}_${id}`, value);
-    });
+    if (this.debug) {
+      console.log(`[SET] ${table}:${fullKey} -> ${jsonValue}`);
+    }
 
     try {
-      op();
+      this.client.db.prepare(query).run(fullKey, jsonValue);
     } catch (error) {
+      this.logError(`Error in set: ${error.message}`);
       throw error;
-    }
-
-    if (this.debug == true) {
-      console.log(`[returning] set(${table}, ${key}, ${id}, ${value}) -> ${typeof value === "object" ? JSON.stringify(value) : value}`);
     }
   }
 
   drop(table, variable) {
-    if (this.debug == true) {
-      console.log(`[received] drop(${table}, ${variable})`);
-    }
-
     const query = variable ? `DELETE FROM ${table} WHERE key = ?` : `DROP TABLE IF EXISTS ${table}`;
-
-    const dropOperation = this.client.db.transaction(() => {
-      this.client.db.prepare(query).run(variable ? variable : undefined);
-    });
+    if (this.debug) {
+      console.log(`[DROP] ${table} ${variable ? `key: ${variable}` : ""}`);
+    }
 
     try {
-      dropOperation();
+      this.client.db.prepare(query).run(variable);
     } catch (error) {
+      this.logError(`Error in drop: ${error.message}`);
       throw error;
-    }
-
-    if (this.debug == true) {
-      console.log(`[returning] drop(${table}, ${variable}) -> dropped ${table}`);
     }
   }
 
-  findOne(table, query) {
+  findOne(table, key) {
     const sql = `SELECT value FROM ${table} WHERE key = ?`;
-    const op = this.client.db.transaction(() => {
-      const result = this.client.db.prepare(sql).get(query)?.value;
-      return result;
-    });
+    if (this.debug) {
+      console.log(`[FIND ONE] ${table}:${key}`);
+    }
 
     try {
-      return op();
+      const row = this.client.db.prepare(sql).get(key);
+      return row ? { value: JSON.parse(row.value), key } : undefined;
     } catch (error) {
+      this.logError(`Error in findOne: ${error.message}`);
       throw error;
     }
   }
 
   deleteMany(table, query) {
-    if (this.debug == true) {
-      console.log(`[received] deleteMany(${table}, ${query})`);
+    if (this.debug) {
+      console.log(`[DELETE MANY] ${table} query: ${JSON.stringify(query)}`);
     }
 
-    if (typeof query === "object") {
-      query = JSON.stringify(query);
+    let sql;
+    if (typeof query === "function") {
+      sql = `DELETE FROM ${table} WHERE key IN (${this.client.db
+        .prepare(`SELECT key FROM ${table}`)
+        .all()
+        .filter(query)
+        .map((r) => `'${r.key}'`)
+        .join(",")})`;
+    } else if (typeof query === "object") {
+      const whereClause = Object.entries(query)
+        .map(([k, v]) => `JSON_EXTRACT(value, '$.${k}') = '${v}'`)
+        .join(" AND ");
+      sql = `DELETE FROM ${table} WHERE ${whereClause}`;
+    } else {
+      sql = `DELETE FROM ${table} WHERE key = ?`;
     }
-
-    const sql = `DELETE FROM ${table} WHERE key = ?`;
-    const op = this.client.db.transaction(() => {
-      this.client.db.prepare(sql).run(query);
-    });
 
     try {
-      op();
+      this.client.db.prepare(sql).run(query);
     } catch (error) {
+      this.logError(`Error in deleteMany: ${error.message}`);
       throw error;
-    }
-
-    if (this.debug == true) {
-      console.log(`[returning] deleteMany(${table}, ${query}) -> deleted`);
     }
   }
 
   delete(table, key, id) {
-    if (this.debug == true) {
-      console.log(`[received] delete(${table}, ${key}_${id})`);
-    }
+    let fullKey = key;
+    if (id) fullKey = `${key}_${id}`;
 
+    if (this.debug) {
+      console.log(`[DELETE] ${table}:${fullKey}`);
+    }
     const sql = `DELETE FROM ${table} WHERE key = ?`;
-    const op = this.client.db.transaction(() => {
-      this.client.db.prepare(sql).run(`${key}_${id}`);
-    });
 
     try {
-      op();
+      this.client.db.prepare(sql).run(fullKey);
     } catch (error) {
+      this.logError(`Error in delete: ${error.message}`);
       throw error;
-    }
-
-    if (this.debug == true) {
-      console.log(`[returned] delete(${table}, ${key}_${id}) -> deleted`);
     }
   }
 
   findMany(table, query, limit) {
-    let results;
-    const sql = `SELECT * FROM ${table} WHERE key LIKE ?`;
-
-    if (this.debug == true) {
-      console.log(`[received] findMany(${table}, ${query}, ${limit})`);
+    if (this.debug) {
+      console.log(`[FIND MANY] ${table} query: ${JSON.stringify(query)} limit: ${limit}`);
     }
-
-    const op = this.client.db.transaction(() => {
+    let results;
+    try {
       if (typeof query === "function") {
         results = this.client.db.prepare(`SELECT * FROM ${table}`).all().filter(query);
+      } else if (typeof query === "object") {
+        const whereClause = Object.entries(query)
+          .map(([k, v]) => `JSON_EXTRACT(value, '$.${k}') = '${v}'`)
+          .join(" AND ");
+        results = this.client.db.prepare(`SELECT * FROM ${table} WHERE ${whereClause}`).all();
       } else {
+        const sql = `SELECT value FROM ${table} WHERE key LIKE ?`;
         results = this.client.db.prepare(sql).all(query);
       }
 
       if (limit) {
         results = results.slice(0, limit);
       }
-    });
-
-    try {
-      op();
-      return results;
+      return results.map((r) => ({ value: r.value, key: r.key }));
     } catch (error) {
+      this.logError(`Error in findMany: ${error.message}`);
       throw error;
     }
   }
 
-  all(table, filter, list = 100, sort = "asc") {
-    let results = [];
-    const sql = `SELECT * FROM ${table}`;
-
-    if (this.debug == true) {
-      console.log(`[received] all(${table}, ${filter}, ${list}, ${sort})`);
+  all(table, filter, limit = 100, sort = "asc") {
+    if (this.debug) {
+      console.log(`[ALL] ${table} limit: ${limit} sort: ${sort}`);
     }
-
-    const op = this.client.db.transaction(() => {
-      results = this.client.db.prepare(sql).all().filter(filter);
-
+    let results = [];
+    try {
+      results = this.client.db
+        .prepare(`SELECT * FROM ${table}`)
+        .all()
+        .filter(filter)
+        .map((row) => ({ value: JSON.parse(row.value), key: row.key }));
       if (sort === "asc") {
         results.sort((a, b) => a.value - b.value);
       } else if (sort === "desc") {
         results.sort((a, b) => b.value - a.value);
       }
-    });
 
-    try {
-      op();
-      if (this.debug == true) {
-        console.log(`[returning] all(${table}, ${filter}, ${list}, ${sort}) -> ${results.length} items`);
-      }
-      return results.slice(0, list);
+      return results.slice(0, limit).map((data) => ({ value: data.value, key: data.key }));
     } catch (error) {
+      this.logError(`Error in all: ${error.message}`);
       throw error;
     }
   }
